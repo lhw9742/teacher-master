@@ -3,17 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Teacher Master v26.16 | 업무 효율 극대화 에디션</title>
-    <link rel="manifest" href="manifest.json">
-    <meta name="theme-color" content="#5d4037">
-    <meta name="mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Teacher Master">
+    <title>Teacher Master v26.17 | Firebase 실시간 동기화</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+    <script>
+    const firebaseConfig = {
+        apiKey: "AIzaSyALUZk7lIYL9Lm5IcljbDlN8dBEJm8d90A",
+        authDomain: "hyunwoo-a1665.firebaseapp.com",
+        projectId: "hyunwoo-a1665",
+        storageBucket: "hyunwoo-a1665.firebasestorage.app",
+        messagingSenderId: "370818173733",
+        appId: "1:370818173733:web:6eeba29c226314f11068cc",
+        measurementId: "G-MFX5HRPSYK"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const DOC_ID = 'lhw9742'; // 사용자 고유 ID
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;600;700;900&display=swap" rel="stylesheet">
     <style>
         :root { --autumn-rust: #a0522d; --forest-bg: #fdfaf5; }
@@ -196,6 +207,54 @@ const App = () => {
     const [editTarget, setEditTarget] = useState(null);
     const [selectedSlot, setSelectedSlot] = useState(null);
     const [searchTerm, setSearchTerm] = useState("");
+    const [syncStatus, setSyncStatus] = useState('idle'); // idle | saving | saved | error
+    const [lastSynced, setLastSynced] = useState(null);
+    const syncTimer = useRef(null);
+
+    // ── Firebase 저장 ─────────────────────────────────────────────
+    const saveToFirebase = useRef(null);
+    saveToFirebase.current = async (data) => {
+        setSyncStatus('saving');
+        try {
+            await db.collection('teacher_master').doc(DOC_ID).set(data, { merge: true });
+            setSyncStatus('saved');
+            setLastSynced(new Date().toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'}));
+            setTimeout(() => setSyncStatus('idle'), 3000);
+        } catch(e) {
+            console.error('Firebase 저장 오류:', e);
+            setSyncStatus('error');
+            setTimeout(() => setSyncStatus('idle'), 4000);
+        }
+    };
+
+    // ── Firebase 불러오기 (최초 1회) ──────────────────────────────
+    useEffect(() => {
+        setSyncStatus('saving');
+        db.collection('teacher_master').doc(DOC_ID).get().then(doc => {
+            if (doc.exists) {
+                const d = doc.data();
+                if (d.weeklySchedule) setWeeklySchedule(d.weeklySchedule);
+                if (d.progress) setProgress(d.progress);
+                if (d.events) setEvents(d.events);
+                if (d.todos) setTodos(d.todos);
+                if (d.readingLogs) setReadingLogs(d.readingLogs);
+                if (d.quickLinks) setQuickLinks(d.quickLinks);
+                if (d.forestMemoLogs) setForestMemoLogs(d.forestMemoLogs);
+                if (d.classConfig) setClassConfig(d.classConfig);
+                setSyncStatus('saved');
+                setLastSynced(new Date().toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'}));
+                setTimeout(() => setSyncStatus('idle'), 2000);
+            } else {
+                // Firebase에 데이터 없음 → 로컬 데이터 그대로 사용
+                setSyncStatus('idle');
+            }
+        }).catch(e => {
+            console.error('Firebase 불러오기 오류:', e);
+            setSyncStatus('error');
+            setTimeout(() => setSyncStatus('idle'), 3000);
+        });
+    }, []);
+
 
     // 교시 시작 분(분단위) 계산
     const getPeriodStartMin = (day, pIdx) => {
@@ -267,8 +326,9 @@ const App = () => {
         return () => clearInterval(interval);
     }, [todayISO, activeTab, weeklySchedule]);
 
-    // 데이터 저장
+    // 데이터 저장 (localStorage + Firebase 자동 동기화)
     useEffect(() => {
+        // localStorage 백업 (오프라인 대비)
         localStorage.setItem('tm_v26_weekly', JSON.stringify(weeklySchedule));
         localStorage.setItem('tm_v26_progress', JSON.stringify(progress));
         localStorage.setItem('tm_v26_events', JSON.stringify(events));
@@ -278,7 +338,20 @@ const App = () => {
         localStorage.setItem('tm_v26_memo_logs', JSON.stringify(forestMemoLogs));
         localStorage.setItem('tm_v26_classconfig', JSON.stringify(classConfig));
         if (window.lucide) window.lucide.createIcons();
-    }, [activeTab, viewDate, weeklySchedule, progress, events, todos, readingLogs, quickLinks, forestMemoLogs, classConfig, modals, alarmToasts, selectedBook]);
+        // Firebase 자동 저장 (2초 디바운스)
+        if (syncTimer.current) clearTimeout(syncTimer.current);
+        syncTimer.current = setTimeout(() => {
+            saveToFirebase.current({
+                weeklySchedule, progress, events, todos,
+                readingLogs, quickLinks, forestMemoLogs, classConfig,
+                updatedAt: new Date().toISOString()
+            });
+        }, 2000);
+    }, [weeklySchedule, progress, events, todos, readingLogs, quickLinks, forestMemoLogs, classConfig]);
+
+    useEffect(() => {
+        if (window.lucide) window.lucide.createIcons();
+    }, [activeTab, viewDate, modals, alarmToasts, selectedBook]);
 
     const toggleTodo = (id) => {
         const today = new Date().toLocaleString('ko-KR');
@@ -573,7 +646,7 @@ const App = () => {
                 NavButton('history','archive','보관함'),
                 NavButton('settings','settings','설정'),
             ]),
-            h('div', { className: "mt-auto text-[7px] font-black text-white/20 uppercase tracking-widest rotate-180", style:{writingMode:'vertical-rl'} }, "v26.16 PRO")
+            h('div', { className: "mt-auto text-[7px] font-black text-white/20 uppercase tracking-widest rotate-180", style:{writingMode:'vertical-rl'} }, "v26.17 SYNC")
         ]),
 
         // ── 메인 ─────────────────────────────────────────────────────
@@ -587,6 +660,23 @@ const App = () => {
                     h('div', null, [
                         h('h1', { className: "text-3xl font-black text-slate-800 tracking-tighter" }, `${getDayName(viewDate)}요일`),
                         h('p', { className: "text-xs font-bold text-slate-400 flex items-center gap-2" }, [h('i', {'data-lucide':'clock', className:'w-3 h-3'}), currentTime]),
+                    ]),
+                    // 동기화 상태 배지
+                    h('div', { className: `flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-black transition-all ${
+                        syncStatus === 'saving' ? 'bg-orange-50 text-orange-400' :
+                        syncStatus === 'saved'  ? 'bg-emerald-50 text-emerald-500' :
+                        syncStatus === 'error'  ? 'bg-red-50 text-red-400' :
+                        'bg-slate-50 text-slate-300'
+                    }` }, [
+                        h('i', {'data-lucide':
+                            syncStatus === 'saving' ? 'loader' :
+                            syncStatus === 'saved'  ? 'cloud-check' :
+                            syncStatus === 'error'  ? 'cloud-off' : 'cloud',
+                            className:'w-3 h-3'
+                        }),
+                        syncStatus === 'saving' ? '저장 중...' :
+                        syncStatus === 'saved'  ? `동기화 완료 ${lastSynced||''}` :
+                        syncStatus === 'error'  ? '동기화 오류' : '클라우드 연결'
                     ])
                 ]),
                 h('div', { className: "text-right" }, [
@@ -1094,15 +1184,6 @@ const App = () => {
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(h(App));
-</script>
-<script>
-if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-            .then(reg => console.log('SW registered:', reg.scope))
-            .catch(err => console.log('SW error:', err));
-    });
-}
 </script>
 </body>
 </html>
